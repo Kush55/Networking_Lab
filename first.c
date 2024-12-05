@@ -4,37 +4,37 @@
 #include <unistd.h>  // For fork and exec
 #include <sys/types.h> 
 #include <sys/wait.h> // For wait
-
 int main() {
     printf("Welcome to ENSEA Shell.\nType 'exit' to quit.\n");
-    
+
+    int last_status = 0; // Variable to store the status of the last command
+
     while (1) {
-        printf("enseash %% ");
-        char input[100];
-        
-        // Read user input
-        if (fgets(input, 100, stdin) == NULL) {
-            break; // Exit on Ctrl+D
+		// Print the dynamic prompt based on the last command's status
+        if (WIFEXITED(last_status)) {
+            printf("enseash [exit:%d] %% ", WEXITSTATUS(last_status));
+        } else if (WIFSIGNALED(last_status)) {
+            printf("enseash [sign:%d] %% ", WTERMSIG(last_status));
+        } else {
+            printf("enseash %% ");
         }
-        if (fgets(input, 100, stdin) == NULL) {
-		printf("\nBye bye...\n"); // Handle <Ctrl>+D
-		break;
-		}
-		if (strcmp(input, "exit") == 0) {
-		printf("Bye bye...\n"); // Handle "exit"
-		break;
-		}
+                char input[100];
 
-
-        // Remove the newline character
-        input[strcspn(input, "\n")] = '\0';
-        
-        // Check for exit command
-        if (strcmp(input, "exit") == 0) {
+        // Read user input
+        if (fgets(input, 100, stdin) == NULL) { 
+            // Handle <Ctrl>+D
+            printf("\nBye bye...\n");
             break;
         }
-      
-        // Fork a child process to execute the command
+                // Remove the newline character
+        input[strcspn(input, "\n")] = '\0';
+
+        // Check for exit command
+        if (strcmp(input, "exit") == 0) { 
+            printf("Bye bye...\n");
+            break;
+        }
+                // Fork a child process to execute the command
         pid_t pid = fork();
         if (pid == -1) {
             perror("fork");
@@ -47,10 +47,9 @@ int main() {
             exit(EXIT_FAILURE);
         } else {
             // In the parent process: wait for the child to finish
-            int status;
-            waitpid(pid, &status, 0);
+            waitpid(pid, &last_status, 0);
         }
     }
-    printf("Goodbye!\n");
+    
     return 0;
 }
