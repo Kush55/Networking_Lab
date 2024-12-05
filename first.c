@@ -1,71 +1,71 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>  // For fork and exec
-#include <sys/types.h> 
-#include <sys/wait.h> // For wait
-#include <time.h> 
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <time.h> // For clock_gettime
+
+#define BILLION 1000000000L
+
 int main() {
     printf("Welcome to ENSEA Shell.\nType 'exit' to quit.\n");
-
-    int last_status = 0; // Variable to store the status of the last command
+    int status = 0;
 
     while (1) {
-        // Print the dynamic prompt based on the last command's status
-        if (WIFEXITED(last_status)) {
-            printf("enseash [exit:%d|", WEXITSTATUS(last_status));
-        } else if (WIFSIGNALED(last_status)) {
-            printf("enseash [sign:%d|", WTERMSIG(last_status));
+        // Display prompt with execution status and time
+        static long elapsed_time = 0; // To hold execution time for the previous command
+        if (WIFEXITED(status)) {
+            printf("enseash [exit:%d|%ldms] %% ", WEXITSTATUS(status), elapsed_time);
+        } else if (WIFSIGNALED(status)) {
+            printf("enseash [sign:%d|%ldms] %% ", WTERMSIG(status), elapsed_time);
         } else {
-            printf("enseash [unknown|");
+            printf("enseash %% ");
         }
-
         char input[100];
-
-        // Read user input
-        if (fgets(input, 100, stdin) == NULL) { 
-            // Handle <Ctrl>+D
+        if (!fgets(input, sizeof(input), stdin)) { // Handle Ctrl+D
             printf("\nBye bye...\n");
             break;
         }
-        // Remove the newline character
-        input[strcspn(input, "\n")] = '\0';
 
-        // Check for exit command
-        if (strcmp(input, "exit") == 0) { 
+        input[strcspn(input, "\n")] = '\0'; // Remove newline
+        if (strcmp(input, "exit") == 0) {  // Handle 'exit'
             printf("Bye bye...\n");
             break;
         }
-        // Fork a child process to execute the command
-        pid_t pid = fork();
-        if (pid == -1) {
-            perror("fork");
-            continue;
+        // Parse the command and arguments
+        char *args[10];
+        int arg_count = 0;
+        char *token = strtok(input, " ");
+        while (token != NULL && arg_count < 10) {
+            args[arg_count++] = token;
+            token = strtok(NULL, " ");
         }
+        args[arg_count] = NULL; // Null-terminate the arguments array
+
+        // Measure execution time
+        struct timespec start, end;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+
+        pid_t pid = fork();
         if (pid == 0) {
-        // In the child process: execute the command
-            execlp(input, input, NULL);
-            perror("execlp"); // If execlp fails
+            // Child process: Execute command
+            execvp(args[0], args);
+            perror("Command not found"); // Error handling
             exit(EXIT_FAILURE);
+        } else if (pid > 0) {
+            // Parent process: Wait and capture status
+            wait(&status);
+            clock_gettime(CLOCK_MONOTONIC, &end);
+
+
+            // Calculate elapsed time in milliseconds
+            elapsed_time = (end.tv_sec - start.tv_sec) * 1000 +
+                           (end.tv_nsec - start.tv_nsec) / 1000000;
         } else {
-            // In the parent process: measure execution time
-            struct timespec start_time, end_time; // Timing variables (Added)
-            clock_gettime(CLOCK_MONOTONIC, &start_time); // Record start time (Added)
-
-            int status;
-            waitpid(pid, &status, 0);
-
-            clock_gettime(CLOCK_MONOTONIC, &end_time); // Record end time (Added)
-
-            // Calculate elapsed time in milliseconds (Added)
-            long elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000 +
-                                (end_time.tv_nsec - start_time.tv_nsec) / 1000000;
-
-            // Update last_status and print elapsed time (Modified)
-            last_status = status;
-            printf("%ldms] %% ", elapsed_time); // Include time in prompt (Modified)
+            perror("Fork failed");
+            exit(EXIT_FAILURE);
         }
     }
-
     return 0;
 }
