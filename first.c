@@ -10,26 +10,28 @@
 
 int main() {
     printf("Welcome to ENSEA Shell.\nType 'exit' to quit.\n");
-    int status = 0;
+    int status = 0; // To track the exit status of commands
+    long elapsed_time = 0; // To track command execution time in ms
 
     while (1) {
-        // Display prompt with execution status and time
-        static long elapsed_time = 0; // To hold execution time for the previous command
+        // Display the prompt with exit status and execution time
         if (WIFEXITED(status)) {
             printf("enseash [exit:%d|%ldms] %% ", WEXITSTATUS(status), elapsed_time);
-        } else if (WIFSIGNALED(status)) {
+        }else if (WIFSIGNALED(status)) {
             printf("enseash [sign:%d|%ldms] %% ", WTERMSIG(status), elapsed_time);
         } else {
             printf("enseash %% ");
         }
+        // Get user input
         char input[100];
         if (!fgets(input, sizeof(input), stdin)) { // Handle Ctrl+D
             printf("\nBye bye...\n");
             break;
         }
 
-        input[strcspn(input, "\n")] = '\0'; // Remove newline
-        if (strcmp(input, "exit") == 0) {  // Handle 'exit'
+        input[strcspn(input, "\n")] = '\0'; // Remove newline character
+        // Check for 'exit' command
+        if (strcmp(input, "exit") == 0) {
             printf("Bye bye...\n");
             break;
         }
@@ -47,25 +49,26 @@ int main() {
         struct timespec start, end;
         clock_gettime(CLOCK_MONOTONIC, &start);
 
+        // Fork a child process to execute the command
         pid_t pid = fork();
         if (pid == 0) {
-            // Child process: Execute command
+            // Child process: Execute command with arguments
             execvp(args[0], args);
-            perror("Command not found"); // Error handling
+            perror("Command not found"); // Error if command fails
             exit(EXIT_FAILURE);
         } else if (pid > 0) {
-            // Parent process: Wait and capture status
+            // Parent process: Wait for the child process
             wait(&status);
             clock_gettime(CLOCK_MONOTONIC, &end);
-
 
             // Calculate elapsed time in milliseconds
             elapsed_time = (end.tv_sec - start.tv_sec) * 1000 +
                            (end.tv_nsec - start.tv_nsec) / 1000000;
-        } else {
-            perror("Fork failed");
+        }else {
+            perror("Fork failed"); // Error if fork fails
             exit(EXIT_FAILURE);
         }
     }
+
     return 0;
 }
