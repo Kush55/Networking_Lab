@@ -4,21 +4,23 @@
 #include <unistd.h>  // For fork and exec
 #include <sys/types.h> 
 #include <sys/wait.h> // For wait
+#include <time.h> 
 int main() {
     printf("Welcome to ENSEA Shell.\nType 'exit' to quit.\n");
 
     int last_status = 0; // Variable to store the status of the last command
 
     while (1) {
-		// Print the dynamic prompt based on the last command's status
+        // Print the dynamic prompt based on the last command's status
         if (WIFEXITED(last_status)) {
-            printf("enseash [exit:%d] %% ", WEXITSTATUS(last_status));
+            printf("enseash [exit:%d|", WEXITSTATUS(last_status));
         } else if (WIFSIGNALED(last_status)) {
-            printf("enseash [sign:%d] %% ", WTERMSIG(last_status));
+            printf("enseash [sign:%d|", WTERMSIG(last_status));
         } else {
-            printf("enseash %% ");
+            printf("enseash [unknown|");
         }
-                char input[100];
+
+        char input[100];
 
         // Read user input
         if (fgets(input, 100, stdin) == NULL) { 
@@ -26,7 +28,7 @@ int main() {
             printf("\nBye bye...\n");
             break;
         }
-                // Remove the newline character
+        // Remove the newline character
         input[strcspn(input, "\n")] = '\0';
 
         // Check for exit command
@@ -34,22 +36,36 @@ int main() {
             printf("Bye bye...\n");
             break;
         }
-                // Fork a child process to execute the command
+        // Fork a child process to execute the command
         pid_t pid = fork();
         if (pid == -1) {
             perror("fork");
             continue;
         }
         if (pid == 0) {
-            // In the child process: execute the command
+        // In the child process: execute the command
             execlp(input, input, NULL);
             perror("execlp"); // If execlp fails
             exit(EXIT_FAILURE);
         } else {
-            // In the parent process: wait for the child to finish
-            waitpid(pid, &last_status, 0);
+            // In the parent process: measure execution time
+            struct timespec start_time, end_time; // Timing variables (Added)
+            clock_gettime(CLOCK_MONOTONIC, &start_time); // Record start time (Added)
+
+            int status;
+            waitpid(pid, &status, 0);
+
+            clock_gettime(CLOCK_MONOTONIC, &end_time); // Record end time (Added)
+
+            // Calculate elapsed time in milliseconds (Added)
+            long elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000 +
+                                (end_time.tv_nsec - start_time.tv_nsec) / 1000000;
+
+            // Update last_status and print elapsed time (Modified)
+            last_status = status;
+            printf("%ldms] %% ", elapsed_time); // Include time in prompt (Modified)
         }
     }
-    
+
     return 0;
 }
