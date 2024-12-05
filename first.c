@@ -16,7 +16,16 @@ int main() {
         if (fgets(input, 100, stdin) == NULL) {
             break; // Exit on Ctrl+D
         }
-        
+        if (fgets(input, 100, stdin) == NULL) {
+		printf("\nBye bye...\n"); // Handle <Ctrl>+D
+		break;
+		}
+		if (strcmp(input, "exit") == 0) {
+		printf("Bye bye...\n"); // Handle "exit"
+		break;
+		}
+
+
         // Remove the newline character
         input[strcspn(input, "\n")] = '\0';
         
