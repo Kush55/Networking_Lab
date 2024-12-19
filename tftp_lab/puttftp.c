@@ -5,23 +5,26 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <sys/time.h> // For gettimeofday()
 
-#define PORT "69"               // TFTP port
+#define PORT "69"               // TFTP port number
 #define DEFAULT_BLOCK_SIZE 512  // Default block size
-#define MAX_PACKET_SIZE 65536   // Max DATA packet size allowed by RFC 2348
+#define MAX_PACKET_SIZE 65536   // Max packet size (RFC 2348 limit)
 
+// Utility function for error handling
 void exit_with_error(const char *msg) {
     perror(msg);
     exit(1);
 }
 
+// Create a UDP socket and resolve server address
 int setup_udp_socket(const char *server_name, struct addrinfo **server_info) {
     struct addrinfo hints, *res;
     int udp_socket;
-
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_DGRAM;
+
     if (getaddrinfo(server_name, PORT, &hints, &res) != 0)
         exit_with_error("Failed to resolve server address");
 
@@ -32,7 +35,7 @@ int setup_udp_socket(const char *server_name, struct addrinfo **server_info) {
     *server_info = res;
     return udp_socket;
 }
-
+// Send WRQ packet with blocksize option
 void send_wrq_with_blocksize(int udp_socket, const char *file_name, int blocksize, struct addrinfo *server_info) {
     char wrq_packet[MAX_PACKET_SIZE];
     size_t wrq_len;
@@ -43,18 +46,20 @@ void send_wrq_with_blocksize(int udp_socket, const char *file_name, int blocksiz
     strcpy(wrq_packet + offset, file_name); offset += strlen(file_name) + 1;
     strcpy(wrq_packet + offset, "octet"); offset += strlen("octet") + 1;
 
-    // Add the "blksize" option
+    // Add blocksize option
     strcpy(wrq_packet + offset, "blksize"); offset += strlen("blksize") + 1;
     sprintf(wrq_packet + offset, "%d", blocksize); offset += strlen(wrq_packet + offset) + 1;
 
     wrq_len = offset;
-    // Send the WRQ packet to the server
+
+    // Send WRQ packet to the server
     if (sendto(udp_socket, wrq_packet, wrq_len, 0, server_info->ai_addr, server_info->ai_addrlen) < 0)
         exit_with_error("Failed to send WRQ with blocksize");
 
     printf("Sent WRQ for file \"%s\" with blocksize=%d.\n", file_name, blocksize);
 }
 
+// Send file with the negotiated blocksize
 void upload_file_with_blocksize(int udp_socket, const char *file_name, int blocksize, struct addrinfo *server_info) {
     FILE *file;
     struct sockaddr_in from_addr;
@@ -71,7 +76,6 @@ void upload_file_with_blocksize(int udp_socket, const char *file_name, int block
         data_packet[0] = 0x00; data_packet[1] = 0x03; // DATA opcode
         block_number++;
         *(short *)(data_packet + 2) = htons(block_number);
-
         // Read up to blocksize bytes from the file
         bytes_read = fread(data_packet + 4, 1, blocksize, file);
 
@@ -84,7 +88,8 @@ void upload_file_with_blocksize(int udp_socket, const char *file_name, int block
         // Wait for ACK
         bytes_received = recvfrom(udp_socket, ack_packet, sizeof(ack_packet), 0, 
                                   (struct sockaddr *)&from_addr, &addr_len);
-        if (bytes_received < 4) exit_with_error("Invalid ACK packet");
+        if (bytes_received < 4)
+            exit_with_error("Invalid ACK packet");
 
         int opcode = ntohs(*(short *)ack_packet);
         int ack_block = ntohs(*(short *)(ack_packet + 2));
@@ -96,26 +101,34 @@ void upload_file_with_blocksize(int udp_socket, const char *file_name, int block
 
         printf("Received ACK for block %d.\n", block_number);
 
-        // Stop if we sent the last block (less than blocksize)
+        // Stop if the last block (less than blocksize) has been sent
         if (bytes_read < blocksize) {
             printf("Last block sent. Upload complete.\n");
             break;
         }
     }
-
     fclose(file);
 }
-void puttftp(const char *server_name, const char *file_name, int blocksize) {
+
+// Measure time for file upload
+void putftp_with_timing(const char *server_name, const char *file_name, int blocksize) {
+    struct timeval start, end;
+    double elapsed_time;
     struct addrinfo *server_info;
     int udp_socket;
-
-    // Setup UDP socket
+    // Setup socket
     udp_socket = setup_udp_socket(server_name, &server_info);
-    // Send WRQ with blocksize
-    send_wrq_with_blocksize(udp_socket, file_name, blocksize, server_info);
 
-    // Upload file with blocksize handling
+    gettimeofday(&start, NULL); // Start the timer
+
+    // Send WRQ and upload the file
+    send_wrq_with_blocksize(udp_socket, file_name, blocksize, server_info);
     upload_file_with_blocksize(udp_socket, file_name, blocksize, server_info);
+    gettimeofday(&end, NULL); // Stop the timer
+
+    // Calculate elapsed time
+    elapsed_time = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1000000.0;
+    printf("Upload completed with blocksize %d in %.3f seconds.\n", blocksize, elapsed_time);
 
     // Cleanup
     close(udp_socket);
@@ -135,9 +148,10 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Blocksize must be between 8 and 65464.\n");
         return 1;
     }
+
     printf("Connecting to server: %s\n", server_name);
     printf("Uploading file: %s with blocksize: %d\n", file_name, blocksize);
-    puttftp(server_name, file_name, blocksize);
+    putftp_with_timing(server_name, file_name, blocksize);
 
     return 0;
 }

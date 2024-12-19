@@ -5,10 +5,12 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <sys/time.h> // For gettimeofday()
 
-#define PORT "69"               // TFTP port
+#define PORT "69"               // TFTP port number
 #define DEFAULT_BLOCK_SIZE 512  // Default block size
-#define MAX_PACKET_SIZE 65536   // Max size for DATA packets (RFC 2348 limit)
+#define MAX_PACKET_SIZE 65536   // Max packet size for RFC 2348
+
 void exit_with_error(const char *msg) {
     perror(msg);
     exit(1);
@@ -17,12 +19,13 @@ void exit_with_error(const char *msg) {
 int setup_udp_socket(const char *server_name, struct addrinfo **server_info) {
     struct addrinfo hints, *res;
     int udp_socket;
+
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_DGRAM;
-
     if (getaddrinfo(server_name, PORT, &hints, &res) != 0)
         exit_with_error("Failed to resolve server address");
+
     udp_socket = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (udp_socket < 0)
         exit_with_error("Socket creation failed");
@@ -30,7 +33,6 @@ int setup_udp_socket(const char *server_name, struct addrinfo **server_info) {
     *server_info = res;
     return udp_socket;
 }
-
 void send_rrq_with_blocksize(int udp_socket, const char *file_name, int blocksize, struct addrinfo *server_info) {
     char rrq_packet[MAX_PACKET_SIZE];
     size_t rrq_len;
@@ -40,19 +42,18 @@ void send_rrq_with_blocksize(int udp_socket, const char *file_name, int blocksiz
     int offset = 2;
     strcpy(rrq_packet + offset, file_name); offset += strlen(file_name) + 1;
     strcpy(rrq_packet + offset, "octet"); offset += strlen("octet") + 1;
+
     // Add the "blksize" option
     strcpy(rrq_packet + offset, "blksize"); offset += strlen("blksize") + 1;
     sprintf(rrq_packet + offset, "%d", blocksize); offset += strlen(rrq_packet + offset) + 1;
 
     rrq_len = offset;
-
     // Send the RRQ packet
     if (sendto(udp_socket, rrq_packet, rrq_len, 0, server_info->ai_addr, server_info->ai_addrlen) < 0)
         exit_with_error("Failed to send RRQ with blocksize");
 
     printf("Sent RRQ for file \"%s\" with blocksize=%d.\n", file_name, blocksize);
 }
-
 void receive_file_with_blocksize(int udp_socket, const char *file_name, int blocksize) {
     struct sockaddr_in from_addr;
     socklen_t addr_len = sizeof(from_addr);
@@ -60,17 +61,17 @@ void receive_file_with_blocksize(int udp_socket, const char *file_name, int bloc
     char ack[4];
     int block_number = 1;
     ssize_t bytes_received;
+
     FILE *file = fopen(file_name, "wb");
     if (!file) exit_with_error("Failed to open file for writing");
-
     while (1) {
         // Receive DATA packet
         bytes_received = recvfrom(udp_socket, buffer, blocksize + 4, 0, (struct sockaddr *)&from_addr, &addr_len);
         if (bytes_received < 4)
             exit_with_error("Received invalid DATA packet");
+
         int opcode = ntohs(*(short *)buffer);
         int received_block = ntohs(*(short *)(buffer + 2));
-
         if (opcode == 3 && received_block == block_number) { // DATA packet
             // Write the received data to the file
             fwrite(buffer + 4, 1, bytes_received - 4, file);
@@ -82,36 +83,41 @@ void receive_file_with_blocksize(int udp_socket, const char *file_name, int bloc
             sendto(udp_socket, ack, 4, 0, (struct sockaddr *)&from_addr, addr_len);
 
             block_number++;
-
             // Stop when the last packet (less than blocksize) is received
             if (bytes_received - 4 < blocksize) {
                 printf("End of file received.\n");
                 break;
             }
- } else if (opcode == 5) { // ERROR packet
+        } else if (opcode == 5) { // ERROR packet
             fprintf(stderr, "Error received from server: %s\n", buffer + 4);
             fclose(file);
             return;
         }
     }
-
     fclose(file);
     printf("File \"%s\" downloaded successfully.\n", file_name);
 }
 
-void gettftp(const char *server_name, const char *file_name, int blocksize) {
+void gettftp_with_timing(const char *server_name, const char *file_name, int blocksize) {
+    struct timeval start, end;
+    double elapsed_time;
     struct addrinfo *server_info;
     int udp_socket;
-
-    // Step 1: Setup the socket
+    // Setup the socket
     udp_socket = setup_udp_socket(server_name, &server_info);
-    // Step 2: Send RRQ with blocksize
+
+    gettimeofday(&start, NULL); // Start the timer
+
+    // Send RRQ and download the file
     send_rrq_with_blocksize(udp_socket, file_name, blocksize, server_info);
-
-    // Step 3: Receive file with blocksize support
     receive_file_with_blocksize(udp_socket, file_name, blocksize);
+   gettimeofday(&end, NULL); // Stop the timer
 
-    // Step 4: Cleanup
+    // Calculate elapsed time
+    elapsed_time = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1000000.0;
+    printf("Download completed with blocksize %d in %.3f seconds.\n", blocksize, elapsed_time);
+
+    // Cleanup
     close(udp_socket);
     freeaddrinfo(server_info);
 }
@@ -129,10 +135,9 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Blocksize must be between 8 and 65464.\n");
         return 1;
     }
-
     printf("Connecting to server: %s\n", server_name);
     printf("Requesting file: %s with blocksize: %d\n", file_name, blocksize);
-    gettftp(server_name, file_name, blocksize);
+    gettftp_with_timing(server_name, file_name, blocksize);
 
     return 0;
 }
