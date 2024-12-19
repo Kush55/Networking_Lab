@@ -6,136 +6,138 @@
 #include <sys/socket.h>
 #include <netdb.h>
 
-#define PORT "69"             // TFTP port number
-#define MAX_PACKET_SIZE 516   // 4-byte header + 512 bytes of data
-#define BLOCK_SIZE 512        // Data size per packet
+#define PORT "69"               // TFTP port
+#define DEFAULT_BLOCK_SIZE 512  // Default block size
+#define MAX_PACKET_SIZE 65536   // Max DATA packet size allowed by RFC 2348
+
 void exit_with_error(const char *msg) {
     perror(msg);
     exit(1);
 }
 
-int create_udp_socket(const char *server_address, struct addrinfo **server_info) {
+int setup_udp_socket(const char *server_name, struct addrinfo **server_info) {
     struct addrinfo hints, *res;
     int udp_socket;
 
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;       // IPv4
-    hints.ai_socktype = SOCK_DGRAM;  // UDP socket
-    // Resolve the server address
-    if (getaddrinfo(server_address, PORT, &hints, &res) != 0)
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(server_name, PORT, &hints, &res) != 0)
         exit_with_error("Failed to resolve server address");
 
-    // Create a socket
-    if ((udp_socket = socket(res->ai_family, res->ai_socktype, res->ai_protocol)) < 0)
+    udp_socket = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (udp_socket < 0)
         exit_with_error("Socket creation failed");
 
-    *server_info = res; // Pass server info back to the caller
+    *server_info = res;
     return udp_socket;
 }
 
-void send_write_request(int udp_socket, const char *file_name, struct addrinfo *server_info) {
+void send_wrq_with_blocksize(int udp_socket, const char *file_name, int blocksize, struct addrinfo *server_info) {
     char wrq_packet[MAX_PACKET_SIZE];
-    size_t packet_size;
+    size_t wrq_len;
 
-    // Format WRQ packet: Opcode (2 bytes) | Filename | 0 | Mode ("octet") | 0
-    wrq_packet[0] = 0x00;
-    wrq_packet[1] = 0x02;  // WRQ Opcode
-    strcpy(wrq_packet + 2, file_name);
-    strcpy(wrq_packet + 2 + strlen(file_name) + 1, "octet");
-    packet_size = 2 + strlen(file_name) + 1 + strlen("octet") + 1;
+    // Format WRQ: Opcode(2 bytes) | Filename | 0 | Mode ("octet") | 0 | "blksize" | 0 | "blocksize value" | 0
+    wrq_packet[0] = 0x00; wrq_packet[1] = 0x02; // WRQ opcode
+    int offset = 2;
+    strcpy(wrq_packet + offset, file_name); offset += strlen(file_name) + 1;
+    strcpy(wrq_packet + offset, "octet"); offset += strlen("octet") + 1;
+
+    // Add the "blksize" option
+    strcpy(wrq_packet + offset, "blksize"); offset += strlen("blksize") + 1;
+    sprintf(wrq_packet + offset, "%d", blocksize); offset += strlen(wrq_packet + offset) + 1;
+
+    wrq_len = offset;
     // Send the WRQ packet to the server
-    if (sendto(udp_socket, wrq_packet, packet_size, 0, server_info->ai_addr, server_info->ai_addrlen) < 0)
-        exit_with_error("Failed to send WRQ");
+    if (sendto(udp_socket, wrq_packet, wrq_len, 0, server_info->ai_addr, server_info->ai_addrlen) < 0)
+        exit_with_error("Failed to send WRQ with blocksize");
 
-    printf("Write request sent for file \"%s\".\n", file_name);
+    printf("Sent WRQ for file \"%s\" with blocksize=%d.\n", file_name, blocksize);
 }
-int wait_for_ack(int udp_socket, int expected_block) {
-    char ack_packet[4];
+
+void upload_file_with_blocksize(int udp_socket, const char *file_name, int blocksize, struct addrinfo *server_info) {
+    FILE *file;
     struct sockaddr_in from_addr;
     socklen_t addr_len = sizeof(from_addr);
-    ssize_t received_bytes;
-
-    // Wait for an ACK packet from the server
-    received_bytes = recvfrom(udp_socket, ack_packet, sizeof(ack_packet), 0, 
-                              (struct sockaddr *)&from_addr, &addr_len);
-    if (received_bytes < 4)
-        exit_with_error("Invalid ACK packet received");
-
-    int opcode = ntohs(*(short *)ack_packet);
-    int block_number = ntohs(*(short *)(ack_packet + 2));
-
-    // Verify it's an ACK for the correct block
-    if (opcode != 4 || block_number != expected_block) {
-        fprintf(stderr, "Unexpected ACK: Block %d (Expected %d)\n", block_number, expected_block);
-        exit(1);
-    }
-
-    return block_number;
-}
-
-void upload_file(int udp_socket, const char *file_name, struct addrinfo *server_info) {
-    FILE *file;
     char data_packet[MAX_PACKET_SIZE];
+    char ack_packet[4];
     int block_number = 0;
-    size_t bytes_read;
-
+    ssize_t bytes_read, bytes_received;
     file = fopen(file_name, "rb");
     if (!file) exit_with_error("Failed to open file for reading");
-    while (1) {
-        // Prepare the DATA packet
-        data_packet[0] = 0x00;
-        data_packet[1] = 0x03;  // DATA Opcode
-        block_number++;
-        *(short *)(data_packet + 2) = htons(block_number);  // Block number
 
-        // Read up to 512 bytes from the file
-        bytes_read = fread(data_packet + 4, 1, BLOCK_SIZE, file);
+    while (1) {
+        // Prepare DATA packet
+        data_packet[0] = 0x00; data_packet[1] = 0x03; // DATA opcode
+        block_number++;
+        *(short *)(data_packet + 2) = htons(block_number);
+
+        // Read up to blocksize bytes from the file
+        bytes_read = fread(data_packet + 4, 1, blocksize, file);
+
         // Send the DATA packet
-        if (sendto(udp_socket, data_packet, bytes_read + 4, 0, 
-                   server_info->ai_addr, server_info->ai_addrlen) < 0)
+        if (sendto(udp_socket, data_packet, bytes_read + 4, 0, server_info->ai_addr, server_info->ai_addrlen) < 0)
             exit_with_error("Failed to send DATA packet");
 
-        printf("Sent block %d, size %zu bytes.\n", block_number, bytes_read);
-        // Wait for an ACK for this block
-        wait_for_ack(udp_socket, block_number);
+        printf("Sent block %d, size %zd bytes.\n", block_number, bytes_read);
+
+        // Wait for ACK
+        bytes_received = recvfrom(udp_socket, ack_packet, sizeof(ack_packet), 0, 
+                                  (struct sockaddr *)&from_addr, &addr_len);
+        if (bytes_received < 4) exit_with_error("Invalid ACK packet");
+
+        int opcode = ntohs(*(short *)ack_packet);
+        int ack_block = ntohs(*(short *)(ack_packet + 2));
+
+        if (opcode != 4 || ack_block != block_number) {
+            fprintf(stderr, "Unexpected ACK: Block %d (Expected %d)\n", ack_block, block_number);
+            break;
+        }
+
         printf("Received ACK for block %d.\n", block_number);
 
-        // If the last block was smaller than 512 bytes, we're done
-        if (bytes_read < BLOCK_SIZE) {
-            printf("Upload complete. All blocks sent.\n");
+        // Stop if we sent the last block (less than blocksize)
+        if (bytes_read < blocksize) {
+            printf("Last block sent. Upload complete.\n");
             break;
         }
     }
 
     fclose(file);
 }
-
-void put_file_to_server(const char *server_name, const char *file_name) {
+void puttftp(const char *server_name, const char *file_name, int blocksize) {
     struct addrinfo *server_info;
     int udp_socket;
 
-    // Create the UDP socket and connect to the server
-    udp_socket = create_udp_socket(server_name, &server_info);
+    // Setup UDP socket
+    udp_socket = setup_udp_socket(server_name, &server_info);
+    // Send WRQ with blocksize
+    send_wrq_with_blocksize(udp_socket, file_name, blocksize, server_info);
 
-    // Send the WRQ to start the upload
-    send_write_request(udp_socket, file_name, server_info);
+    // Upload file with blocksize handling
+    upload_file_with_blocksize(udp_socket, file_name, blocksize, server_info);
 
-    // Upload the file block by block
-    upload_file(udp_socket, file_name, server_info);
-
-    // Clean up
+    // Cleanup
     close(udp_socket);
     freeaddrinfo(server_info);
 }
 int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        printf("Usage: %s <server_name_or_ip> <file_name>\n", argv[0]);
+    if (argc != 4) {
+        printf("Usage: %s <server_name_or_ip> <file_name> <blocksize>\n", argv[0]);
         return 1;
     }
 
-    printf("Connecting to server: %s\n", argv[1]);
-    printf("Uploading file: %s\n", argv[2]);
-    put_file_to_server(argv[1], argv[2]);
+    const char *server_name = argv[1];
+    const char *file_name = argv[2];
+    int blocksize = atoi(argv[3]);
+
+    if (blocksize < 8 || blocksize > 65464) {
+        fprintf(stderr, "Blocksize must be between 8 and 65464.\n");
+        return 1;
+    }
+    printf("Connecting to server: %s\n", server_name);
+    printf("Uploading file: %s with blocksize: %d\n", file_name, blocksize);
+    puttftp(server_name, file_name, blocksize);
 
     return 0;
 }
