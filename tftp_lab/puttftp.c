@@ -1,39 +1,49 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <arpa/inet.h>
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netdb.h> // For getaddrinfo
 
-#define PORT 69
+#define PORT "69"
 #define MAX_PACKET_SIZE 516
 #define BLOCK_SIZE 512
-
 void error(const char *msg) {
     perror(msg);
     exit(1);
 }
 
-void putftp(const char *server_ip, const char *file_name) {
+void putftp(const char *server_name, const char *file_name) {
     int sockfd;
-    struct sockaddr_in server_addr, from_addr;
+    struct addrinfo hints, *server_info, *p;
+    struct sockaddr_in from_addr;
     socklen_t addr_len = sizeof(from_addr);
     char buffer[MAX_PACKET_SIZE], ack[4];
     int block_number = 0;
     ssize_t sent_bytes, received_bytes;
+
+    // Use getaddrinfo to resolve server address
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;       // IPv4
+    hints.ai_socktype = SOCK_DGRAM;  // UDP
+
+    if (getaddrinfo(server_name, PORT, &hints, &server_info) != 0)
+        error("Failed to resolve server address");
+
     // Create UDP socket
-    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
+    for (p = server_info; p != NULL; p = p->ai_next) {
+        if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) >= 0)
+            break;
+    }
+    if (p == NULL)
         error("Socket creation failed");
 
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(PORT);
-    server_addr.sin_addr.s_addr = inet_addr(server_ip);
     // Prepare WRQ (Write Request) packet
     sprintf(buffer, "%c%s%c%s%c", 0x00, file_name, 0x00, "octet", 0x00);
     size_t len = 2 + strlen(file_name) + 1 + strlen("octet") + 1;
-
     // Send WRQ to server
-    if (sendto(sockfd, buffer, len, 0, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
+    if (sendto(sockfd, buffer, len, 0, p->ai_addr, p->ai_addrlen) < 0)
         error("Failed to send WRQ");
 
     FILE *file = fopen(file_name, "rb");
@@ -43,10 +53,11 @@ void putftp(const char *server_ip, const char *file_name) {
     while (1) {
         // Wait for ACK
         received_bytes = recvfrom(sockfd, ack, sizeof(ack), 0, (struct sockaddr *)&from_addr, &addr_len);
-        if (received_bytes < 4 || ntohs(*(short *)ack) != 4 || ntohs(*(short *)(ack + 2)) != block_number) {
+        if (received_bytes < 4 || ntohs((short *)ack) != 4 || ntohs((short *)(ack + 2)) != block_number) {
             fprintf(stderr, "ACK not received for block %d\n", block_number);
             fclose(file);
             close(sockfd);
+            freeaddrinfo(server_info);
             exit(1);
         }
 
@@ -61,6 +72,7 @@ void putftp(const char *server_ip, const char *file_name) {
         sent_bytes = sendto(sockfd, buffer, data_len + 4, 0, (struct sockaddr *)&from_addr, addr_len);
         if (sent_bytes < 0)
             error("Failed to send DATA packet");
+
         if (data_len < BLOCK_SIZE) // End of file
             break;
     }
@@ -68,10 +80,11 @@ void putftp(const char *server_ip, const char *file_name) {
     printf("File \"%s\" uploaded successfully.\n", file_name);
     fclose(file);
     close(sockfd);
+    freeaddrinfo(server_info);
 }
 int main(int argc, char *argv[]) {
     if (argc != 3) {
-        printf("Usage: %s <server_ip> <file_name>\n", argv[0]);
+        printf("Usage: %s <server_name_or_ip> <file_name>\n", argv[0]);
         return 1;
     }
     putftp(argv[1], argv[2]);
